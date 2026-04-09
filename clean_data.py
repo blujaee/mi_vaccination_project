@@ -1,11 +1,14 @@
 import pandas as pd
 
-df = pd.read_excel('data/all.xlsx', usecols=['cntyname','quarter','year','covg4313314','rank4313314'])
-
-filtered_df = df[(df['quarter']=='Q4') & (df['year'] == '2025')]
-
+df = pd.read_excel('data/all.xlsx', usecols=['cntyname', 'quarter', 'year', 'covg4313314','rank4313314'])
 filtered_df = df.query("quarter == 'Q4' and year == 2025")
 
-filtered_df.to_csv('data/filtered_output.csv', index=False)
+popn = pd.read_excel('data/popn_data.xlsx', usecols=['cntyname','pop19_35'])
 
-df['covg4313314'].describe()
+merged = filtered_df.merge(popn, on='cntyname', how='inner')
+
+merged = merged[merged['cntyname'] != 'Michigan']
+
+merged.to_csv('data/filtered_output.csv', index=False)
+
+
