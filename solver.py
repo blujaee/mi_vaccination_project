@@ -39,30 +39,36 @@ df = pd.read_csv("data/filtered_output.csv")
 df['covg4313314'] = pd.to_numeric(df['covg4313314'], errors='coerce')
 df['pop19_35'] = pd.to_numeric(df['pop19_35'], errors='coerce')
 df['unvacc'] = (df['pop19_35'] * (100 - df['covg4313314']) / 100).round(0).astype(int)
-df['cap'] = df['unvacc'].apply(lambda x: math.ceil(x / 20))
 df['weight_int'] = (100 - df['covg4313314']).round(0).astype(int)
 df = df.sort_values('cntyname').reset_index(drop=True)
 
-ALPHA = 20          # vaccinations per visit
-B = 1500            # total visit budget
+ALPHA = 20          # max vaccinations per visit (achieved in high-coverage counties)
+B = 3001            # total visit budget
 MIN_COVERAGE = 0.05 # each county must address at least 5% of its unvaccinated kids
+MAX_COVERAGE = 0.90 # herd-immunity cap
+
+# county-specific alpha: lower coverage = harder to convince = fewer vaccinations per visit
+df['alpha'] = (ALPHA * df['covg4313314'] / 100).round(0).clip(lower=1).astype(int)
 
 model = cp_model.CpModel()
 n = len(df)
 
-x = [model.NewIntVar(0, int(df.loc[i, 'cap']), f"x_{i}") for i in range(n)]
+x = [model.NewIntVar(0, max(0, int(MAX_COVERAGE * df.loc[i, 'unvacc'] / df.loc[i, 'alpha'])), f"x_{i}") for i in range(n)]
 
 # budget
 model.Add(sum(x) <= B)
 
-# equity: each county must cover at least MIN_COVERAGE fraction of its unvaccinated kids
+# each county must address at least 5% of its unvaccinated kids
 for i in range(n):
-    min_visits = math.ceil(MIN_COVERAGE * df.loc[i, 'unvacc'] / ALPHA)
+    alpha_i = int(df.loc[i, 'alpha'])
+    unvacc_i = int(df.loc[i, 'unvacc'])
+    max_visits = int(MAX_COVERAGE * unvacc_i / alpha_i)
+    min_visits = min(max_visits, math.ceil(MIN_COVERAGE * unvacc_i / alpha_i))
     model.Add(x[i] >= min_visits)
 
-# weighted objective: prioritize low-coverage counties (weights scaled x100 for integer requirement)
+# weighted objective: prioritize most-unvaccinated counties
 model.Minimize(sum(
-    int(df.loc[i, 'weight_int']) * (int(df.loc[i, 'unvacc']) - ALPHA * x[i])
+    int(df.loc[i, 'weight_int']) * (int(df.loc[i, 'unvacc']) - int(df.loc[i, 'alpha']) * x[i])
     for i in range(n)
 ))
 
@@ -71,15 +77,25 @@ status = solver.Solve(model)
 
 if status == cp_model.OPTIMAL:
     total_visits = sum(solver.Value(x[i]) for i in range(n))
-    total_vacc = total_visits * ALPHA
-    print(f"Objective: {solver.ObjectiveValue():.0f} (weighted unvaccinated remaining, scaled x100)")
-    print(f"Total visits used: {total_visits} / {B}")
-    print(f"Total vaccinated:  {total_vacc}")
+    total_vacc = sum(solver.Value(x[i]) * int(df.loc[i, 'alpha']) for i in range(n))
+    total_remaining = sum(
+        int(df.loc[i, 'unvacc']) - solver.Value(x[i]) * int(df.loc[i, 'alpha'])
+        for i in range(n)
+    )
+    print(f"Objective: {solver.ObjectiveValue():.0f} (weighted unvaccinated remaining)")
+    print(f"Total visits used:      {total_visits} / {B}")
+    print(f"Total vaccinated:       {total_vacc}")
+    print(f"Unvaccinated remaining: {total_remaining}")
     print(f"\nAllocations:")
     results = []
     for i in range(n):
         v = solver.Value(x[i])
-        print(f"  {df.loc[i,'cntyname']:<20} visits={v:<5}  vaccinated={v*ALPHA:<6}  unvacc={df.loc[i,'unvacc']}")
+        a = int(df.loc[i, 'alpha'])
+        vacc = v * a
+        pop = df.loc[i, 'pop19_35']
+        old_covg = df.loc[i, 'covg4313314']
+        new_covg = min(100.0, old_covg + (vacc / pop * 100))
+        print(f"  {df.loc[i,'cntyname']:<20} visits={v:<5}  {old_covg:5.1f}% -> {new_covg:5.1f}%")
         county = df.loc[i, 'cntyname']
         lat, lon = MI_COUNTY_COORDS.get(county, (None, None))
         results.append({
@@ -87,11 +103,13 @@ if status == cp_model.OPTIMAL:
             'lat': lat,
             'lon': lon,
             'visits': v,
-            'vaccinated': v * ALPHA,
+            'alpha': a,
+            'vaccinated': vacc,
             'unvacc': df.loc[i, 'unvacc'],
-            'coverage_pct': df.loc[i, 'covg4313314'],
+            'old_coverage_pct': round(old_covg, 2),
+            'new_coverage_pct': round(new_covg, 2),
         })
-    pd.DataFrame(results).to_csv("data/solver_output.csv", index=False)
-    print("\nSaved to data/solver_output.csv")
+    pd.DataFrame(results).to_csv("data/3001_solver_output.csv", index=False)
+    print("\nSaved to data/3001_solver_output.csv")
 else:
     print("No optimal solution found")
